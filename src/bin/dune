@@ -1,0 +1,13 @@
+(executable
+ (name main)
+ (public_name hoke)
+ (libraries
+  digestif.ocaml
+  cmdliner
+  mirage-crypto-rng-lwt
+  index.unix
+  fmt
+  hoke
+  obuilder
+  capnp-rpc-unix
+  capnp-rpc-net))

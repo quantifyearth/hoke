@@ -1,0 +1,13 @@
+(library
+ (name hoke)
+ (libraries capnp-rpc-lwt obuilder)
+ (flags
+  (:standard -w -53-55))
+ (preprocess
+  (pps ppx_deriving_yojson)))
+
+(rule
+ (targets schema.ml schema.mli)
+ (deps schema.capnp)
+ (action
+  (run capnpc -o %{bin:capnpc-ocaml} %{deps})))
