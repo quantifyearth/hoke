@@ -2,7 +2,6 @@
  (name main)
  (public_name hoke)
  (libraries
-  digestif.ocaml
   cmdliner
   mirage-crypto-rng-lwt
   index.unix
