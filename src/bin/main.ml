@@ -19,17 +19,35 @@ let create_builder store_spec conf =
   Hoke.Builder.Builder ((module Builder), builder)
 
 let daemon capnp services builder store secrets_dir =
-  let admin_id = Capnp_rpc_unix.Vat_config.derived_id capnp "admin" in
   let restore = Restorer.of_table services in
-  let admin = Admin.v restore store in
-  Restorer.Table.add services admin_id admin;
   let builder_id = Capnp_rpc_unix.Vat_config.derived_id capnp "builder" in
-  let builder = Hoke.Client.v builder in
+  let builder =
+    let sr = Capnp_rpc_net.Restorer.Table.sturdy_ref services builder_id in
+    Hoke.Client.v ~sr builder
+  in
   Restorer.Table.add services builder_id builder;
+  let admin_id = Capnp_rpc_unix.Vat_config.derived_id capnp "admin" in
+  let admin =
+    let sr = Capnp_rpc_net.Restorer.Table.sturdy_ref services admin_id in
+    Admin.v sr restore store
+  in
+  Restorer.Table.add services admin_id admin;
   Capnp_rpc_unix.serve capnp ~restore >>= fun vat ->
   export ~secrets_dir ~vat ~name:"admin" admin_id;
+  let v = Capnp_rpc_unix.Vat_config.sturdy_uri capnp admin_id in
+  Logs.info (fun f -> f "E: %a" Uri.pp v);
   Logs.info (fun f -> f "Hoke running...");
   fst @@ Lwt.wait ()
+
+let run cap_path fn =
+  try
+    Lwt_main.run
+      (let vat = Capnp_rpc_unix.client_only_vat () in
+       let sr = Capnp_rpc_unix.Cap_file.load vat cap_path |> or_fail in
+       Capnp_rpc_unix.with_cap_exn sr fn)
+  with Failure msg ->
+    Printf.eprintf "%s\n%!" msg;
+    exit 1
 
 open Cmdliner
 
@@ -46,6 +64,28 @@ let setup_log =
     const setup_log $ Fmt_cli.style_renderer ~docs () $ Logs_cli.level ~docs ())
 
 let store = Obuilder.Store_spec.cmdliner
+
+let connect_addr =
+  Arg.required
+  @@ Arg.opt Arg.(some file) None
+  @@ Arg.info ~doc:"Path of submission.cap file from ocluster-scheduler."
+       ~docv:"ADDR" [ "c"; "connect" ]
+
+let git =
+  Arg.value
+  @@ Arg.opt Arg.(some string) None
+  @@ Arg.info ~doc:"A git remote to use as the context of a build." ~docv:"GIT"
+       [ "g"; "git" ]
+
+let id =
+  Arg.required
+  @@ Arg.opt Arg.(some string) None
+  @@ Arg.info ~doc:"The obuilder ID of the image to shell." ~docv:"ID" [ "id" ]
+
+let client_name =
+  Arg.required
+  @@ Arg.pos 0 Arg.(some string) None
+  @@ Arg.info ~doc:"The name of the new client to add." ~docv:"NAME" []
 
 let daemon =
   let doc = "run the hoke daemon" in
@@ -64,12 +104,13 @@ let daemon =
     let d =
       create_builder store sandbox >>= fun builder ->
       let make_sturdy = Capnp_rpc_unix.Vat_config.sturdy_uri capnp in
-      let load ~validate:_ =
-        Restorer.grant (Hoke.Client.v builder) |> Lwt.return
+      let load ~validate:_ ~sturdy_ref =
+        let sr = Capnp_rpc_lwt.Sturdy_ref.cast sturdy_ref in
+        Restorer.grant (Hoke.Client.v ~sr builder) |> Lwt.return
       in
       let loader = Store.create ~make_sturdy ~load "hoke.index" in
       let services = Restorer.Table.of_loader (module Store) loader in
-      daemon capnp services builder loader.store ".secrets"
+      daemon capnp services builder loader.store "./secrets"
     in
     Lwt_main.run d
   in
@@ -78,7 +119,72 @@ let daemon =
       const daemon $ setup_log $ Capnp_rpc_unix.Vat_config.cmd $ store
       $ Obuilder.Sandbox.cmdliner)
 
-let cmds = [ daemon ]
+let build =
+  let doc = "send a build spec to the daemon" in
+  let man =
+    [
+      `S Manpage.s_description;
+      `P
+        "Send an Obuilder spec file to a daemon along with an optional git \
+         context.";
+    ]
+  in
+  let info = Cmd.info ~man "build" ~doc in
+  let build () capnp ctx =
+    run capnp @@ fun service ->
+    let spec = In_channel.input_all In_channel.stdin in
+    Client.build service ~ctx ~spec >|= fun t ->
+    match t with
+    | Ok t ->
+        Logs.info (fun f -> f "[%a]: %s" Fmt.(styled `Green string) "SUCCESS" t)
+    | Error _ ->
+        Logs.err (fun f -> f "An error occurred");
+        exit (-1)
+  in
+  Cmd.v info Term.(const build $ setup_log $ connect_addr $ git)
+
+let add =
+  let doc = "add a new client" in
+  let man =
+    [
+      `S Manpage.s_description;
+      `P
+        "Add a new client and get a capablity back to use for that client to \
+         submit builds and connect to the daemon.";
+    ]
+  in
+  let info = Cmd.info ~man "add" ~doc in
+  let build () capnp name =
+    let open Capnp_rpc_lwt in
+    run capnp @@ fun service ->
+    let cap = Hoke.Admin.add_client service name in
+    Capability.with_ref cap @@ fun client ->
+    Persistence.save_exn client >|= fun uri -> Fmt.pr "%a" Uri.pp uri
+  in
+  Cmd.v info Term.(const build $ setup_log $ connect_addr $ client_name)
+
+let shell =
+  let doc = "run a shell from a previously built container" in
+  let man =
+    [
+      `S Manpage.s_description;
+      `P "Connect to a previously built image and have a hoke about.";
+    ]
+  in
+  let info = Cmd.info ~man "shell" ~doc in
+  let build () capnp id =
+    run capnp @@ fun service ->
+    Client.shell service id >|= fun t ->
+    match t with
+    | Ok t ->
+        Logs.info (fun f -> f "[%a]: %s" Fmt.(styled `Green string) "SUCCESS" t)
+    | Error _ ->
+        Logs.err (fun f -> f "An error occurred");
+        exit (-1)
+  in
+  Cmd.v info Term.(const build $ setup_log $ connect_addr $ id)
+
+let cmds = [ daemon; add; build; shell ]
 
 let () =
   let doc = "Hoke" in

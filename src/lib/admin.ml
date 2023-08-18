@@ -3,9 +3,9 @@ open Capnp_rpc_lwt
 
 let ( >>!= ) = Lwt_result.bind
 
-let v ~add_client ~remove_client ~list_clients =
+let v sr ~add_client ~remove_client ~list_clients =
   let module X = Raw.Service.Admin in
-  X.local
+  Capnp_rpc_lwt.Persistence.with_sturdy_ref sr X.local
   @@ object
        inherit X.service
 

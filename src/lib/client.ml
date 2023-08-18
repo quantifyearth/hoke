@@ -11,6 +11,13 @@ let obuilder_spec_of_yojson = function
       Sexplib.Sexp.of_string s |> Obuilder_spec.t_of_sexp |> Result.ok
   | _ -> Error "Failed to parse obuilder spec"
 
+let msg_err = function Ok v -> Ok v | Error s -> Error (`Msg s)
+
+let cancelled_err = function
+  | Ok v -> Ok v
+  | Error `Cancelled -> Error (`Msg "Cancelled")
+  | Error (`Msg m) -> Error (`Msg m)
+
 let obuilder_spec_to_yojson spec =
   Obuilder_spec.sexp_of_t spec |> Sexplib.Sexp.to_string |> fun v -> `String v
 
@@ -19,31 +26,30 @@ type spec = Obuilder of obuilder_spec [@@deriving yojson]
 
 let or_fail = function Ok v -> v | Error r -> failwith r
 
-let with_ctx log _ fn =
+let pp_timestamp f x =
+  let open Unix in
+  let tm = localtime x in
+  Fmt.pf f "%04d-%02d-%02d %02d:%02d.%02d" (tm.tm_year + 1900) (tm.tm_mon + 1)
+    tm.tm_mday tm.tm_hour tm.tm_min tm.tm_sec
+
+let with_ctx ~switch log _ fn =
   Lwt_io.with_temp_dir @@ fun src_dir ->
-  let ctx = Obuilder.Context.v ~log ~src_dir () in
+  let log_to log_data tag msg =
+    match tag with
+    | `Heading -> Job.Log_data.info log_data "\n\027[01;34m%s\027[0m" msg
+    | `Note ->
+        Job.Log_data.info log_data "\027[01;2m\027[01;35m%a %s\027[0m"
+          pp_timestamp (Unix.gettimeofday ()) msg
+    | `Output -> Job.Log_data.write log_data msg
+  in
+  let log = log_to log in
+  let ctx = Obuilder.Context.v ~log ~switch ~src_dir () in
   fn ctx
 
 let to_capnp_error = function
   | Ok v -> Ok v
   | Error `Cancelled -> Error (`Capnp `Cancelled)
   | Error (`Msg s) -> Error (`Capnp (`Exception (Capnp_rpc.Exception.v s)))
-
-let logger log tag msg =
-  let module Log = Raw.Client.Logger.Log in
-  let logger s =
-    let request, params = Capability.Request.create Log.Params.init_pointer in
-    Log.Params.msg_set params s;
-    Lwt.async @@ fun () ->
-    Capnp_rpc_lwt.Capability.call_for_unit_exn log
-      Raw.Client.Logger.Log.method_id request
-  in
-
-  match tag with
-  | `Heading ->
-      Fmt.str "%a@." Fmt.(styled (`Fg (`Hi `Blue)) string) msg |> logger
-  | `Note -> Fmt.str "%a@." Fmt.(styled (`Fg `Yellow) string) msg |> logger
-  | `Output -> Fmt.str "%s@." msg |> logger
 
 let read_all fd : string Lwt.t =
   let open Lwt.Infix in
@@ -72,12 +78,18 @@ let shell (Builder.Builder ((module B), b)) id =
   let open Lwt.Infix in
   Logs.info (fun f -> f "Starting new runc shell");
   let fd_passer =
-    Lwt_unix.socket ~cloexec:true Unix.PF_UNIX Unix.SOCK_STREAM 0
+    Lwt_unix.socket ~cloexec:false Unix.PF_UNIX Unix.SOCK_STREAM 0
   in
   Lwt_unix.setsockopt fd_passer Unix.SO_REUSEADDR true;
-  let unix_sock = Filename.temp_file "runc-" ".sock" in
+  let unix_sock =
+    let f = Filename.temp_file "runc-" ".sock" in
+    Unix.unlink f;
+    f
+  in
+  Logs.info (fun f -> f "New runc socket at %s" unix_sock);
   Lwt_unix.bind fd_passer (Unix.ADDR_UNIX unix_sock) >>= fun () ->
   Lwt_unix.listen fd_passer 5;
+  Logs.info (fun f -> f "Starting a shell");
   let established, _exited = B.shell ~unix_sock b id in
   established >>= fun () ->
   (* Do IOVecs need to be non-empty? *)
@@ -88,15 +100,20 @@ let shell (Builder.Builder ((module B), b)) id =
   Lwt_unix.recv_msg ~socket ~io_vectors >>= fun (_, fds) ->
   let console_fd_unix = List.hd fds in
   let console_fd = Lwt_unix.of_unix_file_descr console_fd_unix in
-  let stdout msg =
+  let stdin msg =
     write_all console_fd (Bytes.of_string msg) 0 (String.length msg)
   in
-  let stdin () = read_all console_fd in
-  Lwt.return (Process.local ~stdin ~stdout ~stderr:(fun _ -> Lwt.return_unit))
+  let stdout () = read_all console_fd in
+  Lwt.return (Process.local ~stdin ~stdout ~stderr:stdout)
 
-let v (Builder.Builder ((module B), v) as builder) =
+let v ?sr (Builder.Builder ((module B), v) as builder) =
   let module X = Raw.Service.Client in
-  X.local
+  let make =
+    match sr with
+    | Some sr -> Capnp_rpc_lwt.Persistence.with_sturdy_ref sr
+    | None -> Fun.id
+  in
+  make X.local
   @@ object
        inherit X.service
 
@@ -104,30 +121,40 @@ let v (Builder.Builder ((module B), v) as builder) =
          let open X.Build in
          let ctx =
            Params.ctx_get params |> Yojson.Safe.from_string |> ctx_of_yojson
-           |> or_fail
+           |> msg_err
          in
          let spec =
-           Params.ctx_get params |> Yojson.Safe.from_string |> spec_of_yojson
-           |> or_fail
+           Params.spec_get params |> Yojson.Safe.from_string |> spec_of_yojson
+           |> msg_err
          in
-         match Params.logger_get params with
-         | None -> Service.fail "No logger!"
-         | Some log ->
-             release_param_caps ();
-             let spec = match spec with Obuilder spec -> spec in
-             Service.return_lwt @@ fun () ->
-             Capability.with_ref log @@ fun log ->
+         release_param_caps ();
+         Service.return_lwt @@ fun () ->
+         match (ctx, spec) with
+         | Ok ctx, Ok (Obuilder spec) ->
              let res =
-               let log = logger log in
-               with_ctx log ctx @@ fun ctx ->
-               B.build v ctx spec >>!= fun id ->
+               let switch = Lwt_switch.create () in
+               let log = Job.Log_data.create () in
+               let outcome, set_outcome = Lwt.wait () in
+               let job =
+                 Job.local ~switch ~outcome
+                   ~stream_log_data:(Job.Log_data.stream log)
+               in
                let response, results =
                  Service.Response.create Results.init_pointer
                in
-               Results.id_set results id;
+               Results.job_set results (Some job);
+               Capability.inc_ref job;
+               with_ctx ~switch log ctx @@ fun ctx ->
+               Lwt.async (fun () ->
+                   B.build v ctx spec >|= fun v ->
+                   Lwt.wakeup_later set_outcome (cancelled_err v));
                Lwt.return_ok response
              in
              res >|= to_capnp_error
+         | Error (`Msg e), _ ->
+             Lwt.return @@ Error (`Capnp (`Exception (Capnp_rpc.Exception.v e)))
+         | _, Error (`Msg e) ->
+             Lwt.return @@ Error (`Capnp (`Exception (Capnp_rpc.Exception.v e)))
 
        method shell_impl params release_param_caps =
          let open X.Shell in
@@ -147,22 +174,17 @@ let v (Builder.Builder ((module B), v) as builder) =
          res >|= to_capnp_error
      end
 
-(* module X = Raw.Client.Client
+module X = Raw.Client.Client
 
-   let stdout t ~data =
-     let open X.Shell in
-     let request, params = Capability.Request.create Params.init_pointer in
-     Params.id_set params data;
-     Capability.call_for_unit_exn t method_id request
+let build t ctx spec =
+  let open X.Build in
+  let request, params = Capability.Request.create Params.init_pointer in
+  Params.ctx_set params (ctx_to_yojson ctx |> Yojson.Safe.to_string);
+  Params.spec_set params (spec_to_yojson spec |> Yojson.Safe.to_string);
+  Capability.call_for_caps t method_id request Results.job_get_pipelined
 
-   let stderr t ~data =
-     let open X.Stderr in
-     let request, params = Capability.Request.create Params.init_pointer in
-     Params.data_set params data;
-     Capability.call_for_unit_exn t method_id request
-
-   let stdin t =
-     let open X.Stdin in
-     let request = Capability.Request.create_no_args () in
-     Capability.call_for_unit_exn t method_id request >>= fun result ->
-     Lwt.return_ok @@ Results.data_get result *)
+let shell t id =
+  let open X.Shell in
+  let request, params = Capability.Request.create Params.init_pointer in
+  Params.id_set params id;
+  Capability.call_for_caps t method_id request Results.process_get_pipelined

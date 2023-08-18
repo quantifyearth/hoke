@@ -1,4 +1,10 @@
 _build
+secrets
+secret
+*.spec
+secret-key.pem
+hoke.index
 
 # Occasionally vendored via git clone
 obuilder
+ocluster
