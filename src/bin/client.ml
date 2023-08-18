@@ -44,7 +44,9 @@ let build submission_cap ~ctx ~spec =
     Hoke.Client.Obuilder spec
   in
   let job = Hoke.Client.build submission_cap ctx spec in
-  tail job 0L >>= fun () -> Hoke.Job.result job
+  let res = Hoke.Job.result job in 
+  tail job 0L >>= fun () ->
+  res
 
 let shell submission_cap id =
   let process = Hoke.Client.shell submission_cap id in

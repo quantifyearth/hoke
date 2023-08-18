@@ -34,6 +34,7 @@ let local ~switch ~outcome ~stream_log_data =
              let response, results =
                Service.Response.create Results.init_pointer
              in
+             Logs.info (fun f -> f "Result setting");
              Results.output_set results output;
              Ok response
 
@@ -86,8 +87,12 @@ module Log_data = struct
     if avail < 0L then Fmt.failwith "Start value out of range!";
     if avail = 0L then
       match t.cond with
-      | `Running cond -> Lwt_condition.wait cond >>= fun () -> stream t ~start
-      | `Finished -> Lwt.return ("", start)
+      | `Running cond -> 
+        Logs.info (fun f -> f "Log not quite finished!");
+        Lwt_condition.wait cond >>= fun () -> stream t ~start
+      | `Finished ->
+        Logs.info (fun f -> f "Log finished!");
+        Lwt.return ("", start)
     else
       let chunk = min avail max_chunk_size in
       let next = Int64.add start chunk in

@@ -147,7 +147,8 @@ let v ?sr (Builder.Builder ((module B), v) as builder) =
                with_ctx ~switch log ctx @@ fun ctx ->
                Lwt.async (fun () ->
                    B.build v ctx spec >|= fun v ->
-                   Lwt.wakeup_later set_outcome (cancelled_err v));
+                   Job.Log_data.close log;
+                   Lwt.wakeup set_outcome (cancelled_err v));
                Lwt.return_ok response
              in
              res >|= to_capnp_error

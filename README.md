@@ -1,6 +1,8 @@
 hoke
 ----
 
+*Status: WIP and Experimental*
+
 > When I hoked there, I would find <br>
 > An acorn and a rusted bolt.
 >
@@ -23,7 +25,7 @@ hoke add --connect ./secrets/admin.cap alice > secrets/submission.cap
 Then it is probably easiest to put an Obuilder specification into a file. For example:
 
 ```
-((from alpine)
+((from debian)
  (run (shell "echo 'hello world'")))
 ```
 
