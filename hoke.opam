@@ -11,7 +11,7 @@ homepage: "https://github.com/patricoferris/hoke"
 bug-reports: "https://github.com/patricoferris/hoke/issues"
 depends: [
   "dune" {>= "3.9"}
-  "obuilder"
+  "obuilder" {= "dev"}
   "capnp-rpc-unix"
   "capnp-rpc-lwt"
   "index"
@@ -35,5 +35,6 @@ build: [
 ]
 dev-repo: "git+https://github.com/patricoferris/hoke.git"
 pin-depends:[
+  [ "obuilder-spec.dev" "git+https://github.com/patricoferris/obuilder#47a511eb7e3ae53a6e166447e9483b6d4c0b1898" ]
   [ "obuilder.dev" "git+https://github.com/patricoferris/obuilder#47a511eb7e3ae53a6e166447e9483b6d4c0b1898" ]
 ]

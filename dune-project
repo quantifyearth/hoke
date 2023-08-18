@@ -14,7 +14,7 @@
  (tags ("sandbox" "docker-build"))
  (description "A simple daemon that uses capnp to allow clients to send build jobs and run shell on a remote obuilder instance.")
  (depends
-   obuilder
+   (obuilder (= dev))
    capnp-rpc-unix
    capnp-rpc-lwt
    index
