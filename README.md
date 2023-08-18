@@ -1,8 +1,7 @@
 hoke
 ----
 
-> When I hoked there, I would find
->
+> When I hoked there, I would find <br>
 > An acorn and a rusted bolt.
 >
 >   -- Seamus Heaney
