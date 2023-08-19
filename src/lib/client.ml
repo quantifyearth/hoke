@@ -51,20 +51,11 @@ let to_capnp_error = function
   | Error `Cancelled -> Error (`Capnp `Cancelled)
   | Error (`Msg s) -> Error (`Capnp (`Exception (Capnp_rpc.Exception.v s)))
 
-let read_all fd : string Lwt.t =
+let bytes = Bytes.create 4096
+
+let read fd : string Lwt.t =
   let open Lwt.Infix in
-  let bytes = Bytes.create 1024 in
-  (* Slow and bad copying... *)
-  let buf = Buffer.create 1024 in
-  let rec loop () =
-    Lwt_unix.read fd bytes 0 1024 >>= fun v ->
-    match v with
-    | 0 | (exception End_of_file) -> Lwt.return @@ Buffer.contents buf
-    | i ->
-        Buffer.add_bytes buf (Bytes.sub bytes 0 i);
-        loop ()
-  in
-  loop ()
+  Lwt_unix.read fd bytes 0 4086 >|= fun v -> Bytes.sub_string bytes 0 v
 
 let rec write_all fd buf ofs len =
   let open Lwt.Infix in
@@ -101,9 +92,17 @@ let shell (Builder.Builder ((module B), b)) id =
   let console_fd_unix = List.hd fds in
   let console_fd = Lwt_unix.of_unix_file_descr console_fd_unix in
   let stdin msg =
+    Logs.info (fun f -> f "stdin %s" msg);
     write_all console_fd (Bytes.of_string msg) 0 (String.length msg)
+    >>= fun () ->
+    write_all console_fd (Bytes.of_string (String.make 1 '\r')) 0 1
   in
-  let stdout () = read_all console_fd in
+  let stdout () =
+    Logs.info (fun f -> f "stdout");
+    read console_fd >|= fun s ->
+    Logs.info (fun f -> f "stdout %s" s);
+    s
+  in
   Lwt.return (Process.local ~stdin ~stdout ~stderr:stdout)
 
 let v ?sr (Builder.Builder ((module B), v) as builder) =

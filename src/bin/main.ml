@@ -172,16 +172,7 @@ let shell =
     ]
   in
   let info = Cmd.info ~man "shell" ~doc in
-  let build () capnp id =
-    run capnp @@ fun service ->
-    Client.shell service id >|= fun t ->
-    match t with
-    | Ok t ->
-        Logs.info (fun f -> f "[%a]: %s" Fmt.(styled `Green string) "SUCCESS" t)
-    | Error _ ->
-        Logs.err (fun f -> f "An error occurred");
-        exit (-1)
-  in
+  let build () capnp id = run capnp @@ fun service -> Client.shell service id in
   Cmd.v info Term.(const build $ setup_log $ connect_addr $ id)
 
 let cmds = [ daemon; add; build; shell ]

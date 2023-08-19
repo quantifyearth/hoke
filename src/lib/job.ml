@@ -85,14 +85,14 @@ module Log_data = struct
     let start = if start < 0L then max 0L (Int64.add len start) else start in
     let avail = Int64.sub len start in
     if avail < 0L then Fmt.failwith "Start value out of range!";
-    if avail = 0L then
+    if avail = 0L then (
       match t.cond with
-      | `Running cond -> 
-        Logs.info (fun f -> f "Log not quite finished!");
-        Lwt_condition.wait cond >>= fun () -> stream t ~start
+      | `Running cond ->
+          Logs.info (fun f -> f "Log not quite finished!");
+          Lwt_condition.wait cond >>= fun () -> stream t ~start
       | `Finished ->
-        Logs.info (fun f -> f "Log finished!");
-        Lwt.return ("", start)
+          Logs.info (fun f -> f "Log finished!");
+          Lwt.return ("", start))
     else
       let chunk = min avail max_chunk_size in
       let next = Int64.add start chunk in
