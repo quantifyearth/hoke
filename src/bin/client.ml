@@ -52,48 +52,45 @@ let shell submission_cap id =
   let stdin = Hoke.Process.stdin process in
   let stdout = Hoke.Process.stdout process in
   let saved_tio = Unix.tcgetattr Unix.stdin in
-  let tio = { saved_tio with (* input modes *)
-                             c_istrip = false } in
+  (* set raw mode *)
+  let tio =
+    {
+      saved_tio with
+      (* input modes *)
+      c_ignpar = true;
+      c_istrip = false;
+      c_inlcr = false;
+      c_igncr = false;
+      c_ixon = false;
+      (* c_ixany = false; *)
+      (* c_iuclc = false; *)
+      c_ixoff = false;
+      (* output modes *)
+      c_opost = false;
+      (* control modes *)
+      c_isig = false;
+      c_icanon = false;
+      c_echo = false;
+      c_echoe = false;
+      c_echok = false;
+      c_echonl = false;
+      (* c_iexten = false; *)
+
+      (* special characters *)
+      c_vmin = 1;
+      c_vtime = 0;
+    }
+  in
   Unix.tcsetattr Unix.stdin TCSADRAIN tio;
-  let buff = Buffer.create 8 in
   let rec stdout_loop () =
     stdout () >>= fun s ->
-    (* Stdout seems to echo back the command, remove it and clear buffer *)
-    if String.equal s (Buffer.contents buff ^ "\r\n") then (
-      Buffer.clear buff;
-      stdout_loop ())
-    else
-      write_all Lwt_unix.stdout (Bytes.of_string s) 0 (String.length s)
-      >>= stdout_loop
+    write_all Lwt_unix.stdout (Bytes.of_string s) 0 (String.length s)
+    >>= stdout_loop
   in
-  let chars, add_char = Lwt_stream.create () in
   let rec stdin_loop () : unit Lwt.t =
     read () >>= function
     | None -> stdin_loop ()
-    | Some data ->
-        String.iter (fun c -> add_char (Some c)) data;
-        stdin_loop ()
+    | Some data -> stdin ~data >>= stdin_loop
   in
-  let send () =
-    let data = Buffer.contents buff in
-    stdin ~data
-  in
-  let rec process_loop () =
-    LTerm_unix.parse_event chars >>= function
-    | LTerm_event.Key { code = Up; _ } ->
-        Buffer.add_string buff "\x1b[A";
-        send () >>= fun () ->
-        Buffer.clear buff;
-        process_loop ()
-    | LTerm_event.Key { code = Down; _ } -> send () >>= process_loop
-    | LTerm_event.Key { code = Left; _ } -> send () >>= process_loop
-    | LTerm_event.Key { code = Right; _ } -> send () >>= process_loop
-    | LTerm_event.Key { code = Enter; _ } -> send () >>= process_loop
-    | LTerm_event.Key { code = Char c; _ } ->
-        Buffer.add_char buff (Uchar.to_char c);
-        process_loop ()
-    | _ -> process_loop ()
-  in
-  Lwt.choose [ stdout_loop (); stdin_loop (); process_loop () ] >|= fun v ->
-  Unix.tcsetattr Unix.stdin TCSADRAIN saved_tio;
-  v
+  Stdlib.at_exit (fun () -> Unix.tcsetattr Unix.stdin TCSADRAIN saved_tio);
+  Lwt.choose [ stdout_loop (); stdin_loop () ]
