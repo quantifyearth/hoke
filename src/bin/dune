@@ -5,7 +5,6 @@
   cmdliner
   mirage-crypto-rng-lwt
   index.unix
-  lambda-term
   fmt
   hoke
   obuilder
